@@ -2,23 +2,35 @@ import pandas as pd
 import os
 import glob
 
+
 def load_all_data(data_path="data"):
     all_files = sorted(glob.glob(os.path.join(data_path, "atp_matches_*.csv")))
     df_list = []
 
     for file in all_files:
-        year = int(os.path.basename(file).split("_")[2].split(".")[0])
-
         temp_df = pd.read_csv(file)
-        temp_df["year"] = year  
-
         df_list.append(temp_df)
 
     full_df = pd.concat(df_list, ignore_index=True)
 
+    full_df["tourney_datetime"] = pd.to_datetime(full_df["tourney_date"], format="%Y%m%d")
+    full_df["tourney_month"] = full_df["tourney_datetime"].dt.month
+    full_df["tourney_year"] = full_df["tourney_datetime"].dt.year
+
+    cols_to_drop = [
+        "tourney_id", "tourney_name", "draw_size", "tourney_date", "match_num",
+        "winner_seed", "winner_entry", "winner_ioc",
+        "loser_seed", "loser_entry", "loser_ioc",
+        "score", "best_of", "minutes",
+        "winner_rank_points", "loser_rank_points"
+    ]
+
+    full_df = full_df.drop(columns=[c for c in cols_to_drop if c in full_df.columns])
+
+    full_df = full_df.dropna()
+
     return full_df
 
-import pandas as pd
 
 def convert_to_player_level(df):
 
@@ -29,7 +41,6 @@ def convert_to_player_level(df):
         "ht": ["winner_ht", "loser_ht"],
         "hand": ["winner_hand", "loser_hand"],
         "rank": ["winner_rank", "loser_rank"],
-        "rank_points": ["winner_rank_points", "loser_rank_points"],
         "ace": ["w_ace", "l_ace"],
         "df": ["w_df", "l_df"],
         "sv_gms": ["w_SvGms", "l_SvGms"],
@@ -48,7 +59,6 @@ def convert_to_player_level(df):
         "ht": ["loser_ht", "winner_ht"],
         "hand": ["loser_hand", "winner_hand"],
         "rank": ["loser_rank", "winner_rank"],
-        "rank_points": ["loser_rank_points", "winner_rank_points"],
         "ace": ["l_ace", "w_ace"],
         "df": ["l_df", "w_df"],
         "sv_gms": ["l_SvGms", "w_SvGms"],
@@ -57,10 +67,7 @@ def convert_to_player_level(df):
     }
 
     # --- Context preserved columns ---
-    context_cols = [
-        "tourney_id", "tourney_name", "surface", "draw_size",
-        "tourney_level", "tourney_date", "round", "minutes", "year"
-    ]
+    context_cols = ["surface", "tourney_level", "tourney_datetime", "round", "tourney_month", "tourney_year"]
 
     # --- Build winner-as-player rows ---
     winner_df = pd.DataFrame({
@@ -69,7 +76,6 @@ def convert_to_player_level(df):
         "player_ht": df[player_map["ht"][0]],
         "player_hand": df[player_map["hand"][0]],
         "player_rank": df[player_map["rank"][0]],
-        "player_rank_points": df[player_map["rank_points"][0]],
         "player_ace": df[player_map["ace"][0]],
         "player_df": df[player_map["df"][0]],
         "player_SvGms": df[player_map["sv_gms"][0]],
@@ -85,7 +91,6 @@ def convert_to_player_level(df):
         "opponent_ht": df[opponent_map["ht"][0]],
         "opponent_hand": df[opponent_map["hand"][0]],
         "opponent_rank": df[opponent_map["rank"][0]],
-        "opponent_rank_points": df[opponent_map["rank_points"][0]],
         "opponent_ace": df[opponent_map["ace"][0]],
         "opponent_df": df[opponent_map["df"][0]],
         "opponent_SvGms": df[opponent_map["sv_gms"][0]],
@@ -105,7 +110,6 @@ def convert_to_player_level(df):
         "player_ht": df[player_map["ht"][1]],
         "player_hand": df[player_map["hand"][1]],
         "player_rank": df[player_map["rank"][1]],
-        "player_rank_points": df[player_map["rank_points"][1]],
         "player_ace": df[player_map["ace"][1]],
         "player_df": df[player_map["df"][1]],
         "player_SvGms": df[player_map["sv_gms"][1]],
@@ -121,7 +125,6 @@ def convert_to_player_level(df):
         "opponent_ht": df[opponent_map["ht"][1]],
         "opponent_hand": df[opponent_map["hand"][1]],
         "opponent_rank": df[opponent_map["rank"][1]],
-        "opponent_rank_points": df[opponent_map["rank_points"][1]],
         "opponent_ace": df[opponent_map["ace"][1]],
         "opponent_df": df[opponent_map["df"][1]],
         "opponent_SvGms": df[opponent_map["sv_gms"][1]],
@@ -136,15 +139,21 @@ def convert_to_player_level(df):
 
     combined = pd.concat([winner_df, loser_df], ignore_index=True)
 
-    combined["df_rate"] = combined["player_df"] / combined["player_SvGms"].replace(0, pd.NA)
+    # combined["df_rate"] = combined["player_df"] / combined["player_SvGms"]
 
     return combined
+
 
 def add_engineered_features(df):
     df = df.copy()
 
+    df = df[(df["player_SvGms"] > 0) & (df["opponent_SvGms"] > 0)]
+
     # Handle divisions safely
     eps = 1e-9
+
+    # Double faults per game
+    df["df_rate"] = df["player_df"] / (df["player_SvGms"] + eps)
 
     # First serve percentage
     df["first_serve_pct"] = df["player_1stIn"] / (df["player_svpt"] + eps)
@@ -172,11 +181,49 @@ def add_engineered_features(df):
     # Opponent pressure
     df["opp_bp_pressure"] = df["opponent_bpFaced"] / (df["opponent_SvGms"] + eps)
 
+    # Break point clutch (saved / faced)
+    df["opp_bp_clutch"] = df["opponent_bpSaved"] / (df["opponent_bpFaced"] + eps)
+
     # Rank difference
     df["rank_diff"] = df["player_rank"] - df["opponent_rank"]
 
     # Height difference
     df["ht_diff"] = df["player_ht"] - df["opponent_ht"]
+
+    return df
+
+
+def add_historical_features(df, min_matches=3, window=10):
+
+    # Sort by player + time so rolling windows work correctly
+    df = df.sort_values(["player_id", "tourney_datetime"]).copy()
+
+    # Engineered features to average
+    hist_features = [
+        "df_rate", "first_serve_pct", "first_serve_win_pct", "second_serve_win_pct",
+        "ace_rate", "bp_pressure", "bp_clutch",
+        "opp_ace_rate", "opp_bp_pressure", "opp_bp_clutch"
+    ]
+
+    # Track number of past matches for each player
+    df["num_prev_matches"] = (
+        df.groupby("player_id")
+          .cumcount()
+    )
+
+    # Compute rolling window means for each historical feature
+    for feat in hist_features:
+        df[f"hist_{feat}_avg"] = (
+            df.groupby("player_id")[feat]
+              .rolling(window, min_periods=1)  # up to last 10 matches
+              .mean()
+              .shift(1)  # ensure only past matches are used
+              .reset_index(level=0, drop=True)
+        )
+
+    # Now filter:
+    # Keep only rows where a player has played >= min_matches past matches
+    df = df[df["num_prev_matches"] >= min_matches].reset_index(drop=True)
 
     return df
 
@@ -196,6 +243,13 @@ if __name__ == "__main__":
     engineered_df.to_csv("data/processed/player_level_engineered.csv", index=False)
     print(engineered_df.shape)
     print(engineered_df.head())
+
+    hist_df = add_historical_features(engineered_df, 3, 10)
+    hist_df.to_csv("data/processed/player_level_with_history.csv", index=False)
+    print(hist_df.shape)
+    print(hist_df.head())
+
+
 
 
 
